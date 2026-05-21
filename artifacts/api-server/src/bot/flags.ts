@@ -223,3 +223,35 @@ export function getShuffledFlags(count: number): FlagEntry[] {
   const shuffled = [...FLAGS].sort(() => Math.random() - 0.5);
   return shuffled.slice(0, Math.min(count, FLAGS.length));
 }
+
+export function generateHint(country: string): string {
+  // Always reveal the first letter of each word; randomly reveal ~1/3 of the rest
+  const chars = country.split("");
+  let prevWasSpace = true;
+  const revealed = new Set<number>();
+
+  for (let i = 0; i < chars.length; i++) {
+    if (chars[i] === " ") {
+      prevWasSpace = true;
+      continue;
+    }
+    if (prevWasSpace) {
+      revealed.add(i);
+      prevWasSpace = false;
+    }
+  }
+
+  // Reveal ~1/3 of the remaining letter positions
+  for (let i = 0; i < chars.length; i++) {
+    if (chars[i] !== " " && !revealed.has(i) && Math.random() < 0.33) {
+      revealed.add(i);
+    }
+  }
+
+  const hinted = chars.map((c, i) => {
+    if (c === " ") return "  ";
+    return revealed.has(i) ? c : "_";
+  });
+
+  return `\`${hinted.join(" ")}\``;
+}

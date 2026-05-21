@@ -1,7 +1,7 @@
 import { type TextChannel, type Message } from "discord.js";
 import { db, flagQuizPlayersTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
-import { FlagEntry, getRandomFlag, getShuffledFlags, isCorrectAnswer } from "./flags.js";
+import { FlagEntry, getRandomFlag, getShuffledFlags, isCorrectAnswer, generateHint } from "./flags.js";
 import { addWin, upsertPlayer } from "./db.js";
 import { logger } from "../lib/logger.js";
 
@@ -17,6 +17,7 @@ export interface ChallengeSession {
   scores: Map<string, { name: string; points: number; wins: number }>;
   active: boolean;
   roundTimer: ReturnType<typeof setTimeout> | null;
+  hintTimer: ReturnType<typeof setTimeout> | null;
   roundStartTime: number;
   participants: Set<string>;
 }
@@ -27,6 +28,7 @@ const activeRounds = new Map<
   {
     flag: FlagEntry;
     timer: ReturnType<typeof setTimeout>;
+    hintTimer: ReturnType<typeof setTimeout>;
     startTime: number;
     participants: Set<string>;
   }
@@ -62,6 +64,16 @@ export async function startSingleRound(
   const startTime = Date.now();
   const participants = new Set<string>();
 
+  const hintTimer = setTimeout(async () => {
+    const stillActive = activeRounds.get(channel.id);
+    if (!stillActive) return;
+    try {
+      await channel.send(`💡 **Hint:** ${generateHint(flag.country)}`);
+    } catch (e) {
+      logger.warn({ err: e }, "Failed to send hint");
+    }
+  }, 8_000);
+
   const timer = setTimeout(async () => {
     activeRounds.delete(channel.id);
     try {
@@ -73,7 +85,7 @@ export async function startSingleRound(
     }
   }, ROUND_TIMEOUT_MS);
 
-  activeRounds.set(channel.id, { flag, timer, startTime, participants });
+  activeRounds.set(channel.id, { flag, timer, hintTimer, startTime, participants });
 
   await channel.send(
     `🌍 **Flag Quiz!** What country does this flag belong to?\n\n${flag.flag}\n\n*You have 15 seconds! Type your answer in chat.*`,
@@ -93,6 +105,7 @@ export async function handleGuess(message: Message): Promise<void> {
 
     if (isCorrectAnswer(round.flag, answer)) {
       clearTimeout(round.timer);
+      clearTimeout(round.hintTimer);
       activeRounds.delete(channelId);
 
       const elapsed = Date.now() - round.startTime;
@@ -125,6 +138,10 @@ export async function handleGuess(message: Message): Promise<void> {
       if (session.roundTimer) {
         clearTimeout(session.roundTimer);
         session.roundTimer = null;
+      }
+      if (session.hintTimer) {
+        clearTimeout(session.hintTimer);
+        session.hintTimer = null;
       }
 
       const elapsed = Date.now() - session.roundStartTime;
@@ -170,6 +187,17 @@ async function sendChallengeRound(
     `🌍 **Round ${session.currentIndex + 1}/${session.flags.length}** — What country is this?\n\n${flag.flag}\n\n*25 seconds!*`,
   );
 
+  session.hintTimer = setTimeout(async () => {
+    if (!session.active) return;
+    const current = session.flags[session.currentIndex];
+    if (!current || current !== flag) return;
+    try {
+      await channel.send(`💡 **Hint:** ${generateHint(flag.country)}`);
+    } catch (e) {
+      logger.warn({ err: e }, "Failed to send challenge hint");
+    }
+  }, 15_000);
+
   session.roundTimer = setTimeout(async () => {
     if (!session.active) return;
 
@@ -198,6 +226,10 @@ async function endChallenge(
   if (session.roundTimer) {
     clearTimeout(session.roundTimer);
     session.roundTimer = null;
+  }
+  if (session.hintTimer) {
+    clearTimeout(session.hintTimer);
+    session.hintTimer = null;
   }
   activeChallenges.delete(session.channelId);
 
@@ -262,6 +294,7 @@ export async function startChallenge(channel: TextChannel): Promise<void> {
     scores: new Map(),
     active: true,
     roundTimer: null,
+    hintTimer: null,
     roundStartTime: Date.now(),
     participants: new Set(),
   };
@@ -280,6 +313,7 @@ export async function endActiveRound(channel: TextChannel): Promise<void> {
   const round = activeRounds.get(channel.id);
   if (round) {
     clearTimeout(round.timer);
+    clearTimeout(round.hintTimer);
     activeRounds.delete(channel.id);
     await channel.send(
       `🛑 Round ended by a moderator. The answer was **${round.flag.country}** ${round.flag.flag}`,
@@ -291,6 +325,7 @@ export async function endActiveRound(channel: TextChannel): Promise<void> {
   if (session) {
     session.active = false;
     if (session.roundTimer) clearTimeout(session.roundTimer);
+    if (session.hintTimer) clearTimeout(session.hintTimer);
     activeChallenges.delete(channel.id);
     await channel.send(`🛑 Challenge ended by a moderator.`);
     return;
