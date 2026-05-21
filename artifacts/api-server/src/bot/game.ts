@@ -6,6 +6,7 @@ import { addWin, upsertPlayer } from "./db.js";
 import { logger } from "../lib/logger.js";
 
 const ROUND_TIMEOUT_MS = 15_000;
+const CHALLENGE_TIMEOUT_MS = 25_000;
 const MAX_POINTS = 100;
 const MIN_POINTS = 10;
 
@@ -42,8 +43,8 @@ export function isChallengeActive(channelId: string): boolean {
   return activeChallenges.has(channelId);
 }
 
-function calcPoints(elapsedMs: number): number {
-  const frac = Math.min(elapsedMs / ROUND_TIMEOUT_MS, 1);
+function calcPoints(elapsedMs: number, timeoutMs = ROUND_TIMEOUT_MS): number {
+  const frac = Math.min(elapsedMs / timeoutMs, 1);
   const pts = Math.round(MAX_POINTS - (MAX_POINTS - MIN_POINTS) * frac);
   return Math.max(pts, MIN_POINTS);
 }
@@ -127,7 +128,7 @@ export async function handleGuess(message: Message): Promise<void> {
       }
 
       const elapsed = Date.now() - session.roundStartTime;
-      const points = calcPoints(elapsed);
+      const points = calcPoints(elapsed, CHALLENGE_TIMEOUT_MS);
       const elapsedSec = (elapsed / 1000).toFixed(1);
 
       const existing = session.scores.get(userId);
@@ -166,7 +167,7 @@ async function sendChallengeRound(
   session.participants = new Set();
 
   await channel.send(
-    `🌍 **Round ${session.currentIndex + 1}/${session.flags.length}** — What country is this?\n\n${flag.flag}\n\n*15 seconds!*`,
+    `🌍 **Round ${session.currentIndex + 1}/${session.flags.length}** — What country is this?\n\n${flag.flag}\n\n*25 seconds!*`,
   );
 
   session.roundTimer = setTimeout(async () => {
@@ -186,7 +187,7 @@ async function sendChallengeRound(
     } else {
       await sendChallengeRound(channel, session);
     }
-  }, ROUND_TIMEOUT_MS);
+  }, CHALLENGE_TIMEOUT_MS);
 }
 
 async function endChallenge(

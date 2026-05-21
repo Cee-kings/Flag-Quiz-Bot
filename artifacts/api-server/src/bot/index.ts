@@ -47,8 +47,8 @@ async function handleCommand(message: Message): Promise<void> {
     return;
   }
 
-  // !challenge — start a 20-flag challenge
-  if (content.toLowerCase() === `${PREFIX}challenge`) {
+  // !flagchallenge — start a 20-flag challenge
+  if (content.toLowerCase() === `${PREFIX}flagchallenge`) {
     await startChallenge(channel);
     return;
   }
