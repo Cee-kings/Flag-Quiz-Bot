@@ -47,6 +47,20 @@ async function handleCommand(message: Message): Promise<void> {
     return;
   }
 
+  // !help — show all commands
+  if (content.toLowerCase() === `${PREFIX}help`) {
+    await channel.send(
+      `🌍 **Flag Quiz Bot — Commands**\n\n` +
+      `**\`!flag\`** — Start a single flag round (15 seconds to guess)\n` +
+      `**\`!flagchallenge\`** — Run 20 unique flags in a row with speed scoring and final standings (25 seconds per flag)\n` +
+      `**\`!leaderboard\`** — Show the top 10 players by total score\n` +
+      `**\`!score\`** — Show your personal stats (score, wins, rounds, win rate)\n` +
+      `**\`!endflag\`** — *(Mods only)* Stop the current round or challenge\n\n` +
+      `💡 **Scoring:** 100 pts for an instant answer, dropping to 10 pts at the time limit — speed counts!`,
+    );
+    return;
+  }
+
   // !flagchallenge — start a 20-flag challenge
   if (content.toLowerCase() === `${PREFIX}flagchallenge`) {
     await startChallenge(channel);
