@@ -7,7 +7,7 @@ COPY lib/ ./lib/
 COPY artifacts/api-server/ ./artifacts/api-server/
 ENV CI=true
 RUN pnpm install --frozen-lockfile --ignore-scripts --shamefully-hoist
-RUN pnpm --filter "@workspace/api-server" run build
+RUN pnpm --filter "@workspace/api-server" run build --ignore-scripts
 ENV NODE_ENV=production
 ENV PORT=8080
 CMD ["node", "--enable-source-maps", "./artifacts/api-server/dist/index.mjs"]
