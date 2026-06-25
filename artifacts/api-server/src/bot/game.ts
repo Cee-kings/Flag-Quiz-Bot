@@ -441,24 +441,51 @@ export async function startChallenge(channel: TextChannel): Promise<void> {
 export async function endActiveRound(channel: TextChannel): Promise<void> {
   const round = activeRounds.get(channel.id);
   if (round) {
+    // Remove state and clear timers synchronously so no timer fires after this.
     clearTimeout(round.timer);
     clearTimeout(round.hintTimer);
     activeRounds.delete(channel.id);
-    await channel.send(
-      `🛑 Round ended by a moderator. The answer was **${round.flag.country}** ${round.flag.flag}`,
-    );
+    try {
+      await channel.send(
+        `🛑 Round ended by a moderator. The answer was **${round.flag.country}** ${round.flag.flag}`,
+      );
+    } catch (e) {
+      logger.warn({ err: e }, "Failed to send endActiveRound message (single)");
+    }
     return;
   }
 
   const session = activeChallenges.get(channel.id);
   if (session) {
+    // Mark inactive and remove before any await so concurrent timer callbacks
+    // see session.active = false and bail out immediately.
     session.active = false;
-    if (session.roundTimer) clearTimeout(session.roundTimer);
-    if (session.hintTimer) clearTimeout(session.hintTimer);
+    if (session.roundTimer) {
+      clearTimeout(session.roundTimer);
+      session.roundTimer = null;
+    }
+    if (session.hintTimer) {
+      clearTimeout(session.hintTimer);
+      session.hintTimer = null;
+    }
     activeChallenges.delete(channel.id);
-    await channel.send(`🛑 Challenge ended by a moderator.`);
+
+    // Wait one tick so any sendChallengeRound call currently awaiting a
+    // channel.send() has a chance to finish before we send our own message.
+    // Without this the two concurrent sends can collide and ours gets dropped.
+    await new Promise((r) => setTimeout(r, 0));
+
+    try {
+      await channel.send(`🛑 Challenge ended by a moderator.`);
+    } catch (e) {
+      logger.warn({ err: e }, "Failed to send endActiveRound message (challenge)");
+    }
     return;
   }
 
-  await channel.send("ℹ️ There's no active round or challenge to end.");
+  try {
+    await channel.send("ℹ️ There's no active round or challenge to end.");
+  } catch (e) {
+    logger.warn({ err: e }, "Failed to send endActiveRound message (none)");
+  }
 }
