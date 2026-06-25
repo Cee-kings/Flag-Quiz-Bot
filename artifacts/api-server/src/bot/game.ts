@@ -277,6 +277,13 @@ async function sendChallengeRound(
     `🌍 **Round ${roundIndex + 1}/${session.flags.length}** — What country is this?\n\n${flag.flag}\n\n*25 seconds!*`,
   );
 
+  // Account for however long Discord's send() took so timers always fire at
+  // exactly CHALLENGE_TIMEOUT_MS / 15s from roundStartTime, not from after
+  // the network call completes.  On slow connections this can be 2-3 seconds.
+  const sendElapsed = Date.now() - session.roundStartTime;
+  const hintDelay   = Math.max(0, 15_000 - sendElapsed);
+  const roundDelay  = Math.max(0, CHALLENGE_TIMEOUT_MS - sendElapsed);
+
   session.hintTimer = setTimeout(async () => {
     if (!session.active) return;
     // Guard: only send hint if we're still on this same round
@@ -288,7 +295,7 @@ async function sendChallengeRound(
     } catch (e) {
       logger.warn({ err: e }, "Failed to send challenge hint");
     }
-  }, 15_000);
+  }, hintDelay);
 
   session.roundTimer = setTimeout(async () => {
     if (!session.active) return;
@@ -333,7 +340,7 @@ async function sendChallengeRound(
     } else {
       await sendChallengeRound(channel, session);
     }
-  }, CHALLENGE_TIMEOUT_MS);
+  }, roundDelay);
 }
 
 async function endChallenge(
