@@ -22,17 +22,18 @@ export interface ChallengeSession {
   participants: Set<string>;
 }
 
+// Shape of a single-round entry — the timer closes over the reference
+// so it can check identity before firing.
+interface SingleRound {
+  flag: FlagEntry;
+  timer: ReturnType<typeof setTimeout>;
+  hintTimer: ReturnType<typeof setTimeout>;
+  startTime: number;
+  participants: Set<string>;
+}
+
 // Active single-round channels
-const activeRounds = new Map<
-  string,
-  {
-    flag: FlagEntry;
-    timer: ReturnType<typeof setTimeout>;
-    hintTimer: ReturnType<typeof setTimeout>;
-    startTime: number;
-    participants: Set<string>;
-  }
->();
+const activeRounds = new Map<string, SingleRound>();
 
 // Active challenge sessions
 const activeChallenges = new Map<string, ChallengeSession>();
@@ -51,6 +52,10 @@ function calcPoints(elapsedMs: number, timeoutMs = ROUND_TIMEOUT_MS): number {
   return Math.max(pts, MIN_POINTS);
 }
 
+// ---------------------------------------------------------------------------
+// Single round
+// ---------------------------------------------------------------------------
+
 export async function startSingleRound(
   channel: TextChannel,
   startedBy: string,
@@ -64,9 +69,22 @@ export async function startSingleRound(
   const startTime = Date.now();
   const participants = new Set<string>();
 
+  // We build the round object first so the timer closure can reference it.
+  // TypeScript needs the cast because timer is assigned just below.
+  const roundRef = {
+    flag,
+    timer: null as unknown as ReturnType<typeof setTimeout>,
+    hintTimer: null as unknown as ReturnType<typeof setTimeout>,
+    startTime,
+    participants,
+  } satisfies Omit<SingleRound, "timer" | "hintTimer"> & {
+    timer: ReturnType<typeof setTimeout> | null;
+    hintTimer: ReturnType<typeof setTimeout> | null;
+  };
+
   const hintTimer = setTimeout(async () => {
-    const stillActive = activeRounds.get(channel.id);
-    if (!stillActive) return;
+    // Only send hint if this exact round is still active
+    if (activeRounds.get(channel.id) !== (roundRef as SingleRound)) return;
     try {
       await channel.send(`💡 **Hint:** ${generateHint(flag.country)}`);
     } catch (e) {
@@ -75,7 +93,31 @@ export async function startSingleRound(
   }, 8_000);
 
   const timer = setTimeout(async () => {
+    // -----------------------------------------------------------------------
+    // RACE-CONDITION GUARD (single round / timeout path)
+    // Check identity synchronously BEFORE any await.  If handleGuess already
+    // removed this round from the map, current will be undefined or a newer
+    // round object — either way we bail out without sending anything.
+    // -----------------------------------------------------------------------
+    const current = activeRounds.get(channel.id);
+    if (current !== (roundRef as SingleRound)) {
+      logger.debug(
+        { channelId: channel.id, trigger: "timeout", roundCountry: flag.country, ts: new Date().toISOString() },
+        "[ROUND-ADVANCE] timeout guard rejected — round already advanced",
+      );
+      return;
+    }
+
+    // We own this advance: remove from map before first await so concurrent
+    // handleGuess calls see no round.
     activeRounds.delete(channel.id);
+    clearTimeout(roundRef.hintTimer);
+
+    logger.debug(
+      { channelId: channel.id, trigger: "timeout", roundCountry: flag.country, ts: new Date().toISOString() },
+      "[ROUND-ADVANCE] single-round timeout advancing",
+    );
+
     try {
       await channel.send(
         `⏱️ Time's up! Nobody guessed it. The answer was **${flag.country}** ${flag.flag}`,
@@ -85,12 +127,19 @@ export async function startSingleRound(
     }
   }, ROUND_TIMEOUT_MS);
 
-  activeRounds.set(channel.id, { flag, timer, hintTimer, startTime, participants });
+  roundRef.timer = timer;
+  roundRef.hintTimer = hintTimer;
+
+  activeRounds.set(channel.id, roundRef as SingleRound);
 
   await channel.send(
     `🌍 **Flag Quiz!** What country does this flag belong to?\n\n${flag.flag}\n\n*You have 15 seconds! Type your answer in chat.*`,
   );
 }
+
+// ---------------------------------------------------------------------------
+// Guess handler
+// ---------------------------------------------------------------------------
 
 export async function handleGuess(message: Message): Promise<void> {
   const channelId = message.channel.id;
@@ -98,15 +147,32 @@ export async function handleGuess(message: Message): Promise<void> {
   const username = message.author.username;
   const answer = message.content.trim();
 
-  // Single round guess
+  // --- Single round guess ---------------------------------------------------
   const round = activeRounds.get(channelId);
   if (round) {
     round.participants.add(userId);
 
     if (isCorrectAnswer(round.flag, answer)) {
+      // -----------------------------------------------------------------------
+      // RACE-CONDITION GUARD (single round / answer path)
+      // Remove from map and clear timers synchronously before any await so the
+      // timeout callback (if it fires right now) will fail its identity check
+      // and bail out without sending "Time's up".
+      // -----------------------------------------------------------------------
+      const current = activeRounds.get(channelId);
+      if (current !== round) {
+        // Another path already advanced this round (shouldn't happen in
+        // single-round, but guard anyway).
+        return;
+      }
+      activeRounds.delete(channelId);
       clearTimeout(round.timer);
       clearTimeout(round.hintTimer);
-      activeRounds.delete(channelId);
+
+      logger.debug(
+        { channelId, trigger: "answer", roundCountry: round.flag.country, userId, ts: new Date().toISOString() },
+        "[ROUND-ADVANCE] single-round correct answer advancing",
+      );
 
       const elapsed = Date.now() - round.startTime;
       const points = calcPoints(elapsed);
@@ -126,15 +192,30 @@ export async function handleGuess(message: Message): Promise<void> {
     return;
   }
 
-  // Challenge guess
+  // --- Challenge guess ------------------------------------------------------
   const session = activeChallenges.get(channelId);
   if (session && session.active) {
-    const currentFlag = session.flags[session.currentIndex];
+    const expectedIndex = session.currentIndex; // capture synchronously
+    const currentFlag = session.flags[expectedIndex];
     if (!currentFlag) return;
 
     session.participants.add(userId);
 
     if (isCorrectAnswer(currentFlag, answer)) {
+      // -----------------------------------------------------------------------
+      // RACE-CONDITION GUARD (challenge / answer path)
+      // Re-check currentIndex synchronously — if the timeout already advanced
+      // it during a prior await, this round is no longer ours.
+      // -----------------------------------------------------------------------
+      if (session.currentIndex !== expectedIndex) {
+        logger.debug(
+          { channelId, trigger: "answer", roundIndex: expectedIndex, ts: new Date().toISOString() },
+          "[ROUND-ADVANCE] challenge answer guard rejected — round already advanced",
+        );
+        return;
+      }
+
+      // Own this advance: clear timers and bump index before any await.
       if (session.roundTimer) {
         clearTimeout(session.roundTimer);
         session.roundTimer = null;
@@ -143,6 +224,12 @@ export async function handleGuess(message: Message): Promise<void> {
         clearTimeout(session.hintTimer);
         session.hintTimer = null;
       }
+      session.currentIndex++;
+
+      logger.debug(
+        { channelId, trigger: "answer", roundIndex: expectedIndex, userId, ts: new Date().toISOString() },
+        "[ROUND-ADVANCE] challenge correct answer advancing",
+      );
 
       const elapsed = Date.now() - session.roundStartTime;
       const points = calcPoints(elapsed, CHALLENGE_TIMEOUT_MS);
@@ -156,13 +243,11 @@ export async function handleGuess(message: Message): Promise<void> {
         session.scores.set(userId, { name: username, points, wins: 1 });
       }
 
-      const progress = `${session.currentIndex + 1}/${session.flags.length}`;
+      const progress = `${expectedIndex + 1}/${session.flags.length}`;
       const ch2 = message.channel as TextChannel;
       await ch2.send(
         `✅ **${username}** got it in **${elapsedSec}s** — **+${points} pts**! *(Round ${progress})* The answer was **${currentFlag.country}** ${currentFlag.flag}`,
       );
-
-      session.currentIndex++;
 
       if (session.currentIndex >= session.flags.length) {
         await endChallenge(message.channel as TextChannel, session);
@@ -173,22 +258,29 @@ export async function handleGuess(message: Message): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Challenge rounds
+// ---------------------------------------------------------------------------
+
 async function sendChallengeRound(
   channel: TextChannel,
   session: ChallengeSession,
 ): Promise<void> {
-  const flag = session.flags[session.currentIndex];
+  const roundIndex = session.currentIndex; // capture before any async work
+  const flag = session.flags[roundIndex];
   if (!flag) return;
 
   session.roundStartTime = Date.now();
   session.participants = new Set();
 
   await channel.send(
-    `🌍 **Round ${session.currentIndex + 1}/${session.flags.length}** — What country is this?\n\n${flag.flag}\n\n*25 seconds!*`,
+    `🌍 **Round ${roundIndex + 1}/${session.flags.length}** — What country is this?\n\n${flag.flag}\n\n*25 seconds!*`,
   );
 
   session.hintTimer = setTimeout(async () => {
     if (!session.active) return;
+    // Guard: only send hint if we're still on this same round
+    if (session.currentIndex !== roundIndex) return;
     const current = session.flags[session.currentIndex];
     if (!current || current !== flag) return;
     try {
@@ -201,6 +293,33 @@ async function sendChallengeRound(
   session.roundTimer = setTimeout(async () => {
     if (!session.active) return;
 
+    // -----------------------------------------------------------------------
+    // RACE-CONDITION GUARD (challenge / timeout path)
+    // Check synchronously BEFORE the first await.  If handleGuess already
+    // incremented currentIndex during a prior await in this callback, we bail.
+    // -----------------------------------------------------------------------
+    if (session.currentIndex !== roundIndex) {
+      logger.debug(
+        { channelId: channel.id, trigger: "timeout", roundIndex, ts: new Date().toISOString() },
+        "[ROUND-ADVANCE] challenge timeout guard rejected — round already advanced",
+      );
+      return;
+    }
+
+    // Own this advance: bump index and clear hint timer synchronously before
+    // any await so handleGuess cannot also advance this round.
+    session.currentIndex++;
+    if (session.hintTimer) {
+      clearTimeout(session.hintTimer);
+      session.hintTimer = null;
+    }
+    session.roundTimer = null;
+
+    logger.debug(
+      { channelId: channel.id, trigger: "timeout", roundIndex, ts: new Date().toISOString() },
+      "[ROUND-ADVANCE] challenge timeout advancing",
+    );
+
     try {
       await channel.send(
         `⏱️ Time's up! The answer was **${flag.country}** ${flag.flag}`,
@@ -209,7 +328,6 @@ async function sendChallengeRound(
       logger.warn({ err: e }, "Failed to send challenge timeout");
     }
 
-    session.currentIndex++;
     if (session.currentIndex >= session.flags.length) {
       await endChallenge(channel, session);
     } else {
@@ -279,6 +397,10 @@ async function endChallenge(
     `🏁 **Challenge Complete! Final Standings:**\n\n${lines.join("\n")}\n\nCongratulations to **${sorted[0]![1].name}**! 🎊`,
   );
 }
+
+// ---------------------------------------------------------------------------
+// Public helpers
+// ---------------------------------------------------------------------------
 
 export async function startChallenge(channel: TextChannel): Promise<void> {
   if (isRoundActive(channel.id)) {
