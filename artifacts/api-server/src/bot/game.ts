@@ -245,10 +245,16 @@ export async function handleGuess(message: Message): Promise<void> {
 
       const progress = `${expectedIndex + 1}/${session.flags.length}`;
       const ch2 = message.channel as TextChannel;
-      await ch2.send(
-        `✅ **${username}** got it in **${elapsedSec}s** — **+${points} pts**! *(Round ${progress})* The answer was **${currentFlag.country}** ${currentFlag.flag}`,
-      );
+      try {
+        await ch2.send(
+          `✅ **${username}** got it in **${elapsedSec}s** — **+${points} pts**! *(Round ${progress})* The answer was **${currentFlag.country}** ${currentFlag.flag}`,
+        );
+      } catch (e) {
+        logger.warn({ err: e }, "Failed to send correct-answer message (challenge)");
+      }
 
+      // Always advance to the next round even if the send failed, so the game
+      // doesn't get stuck with currentIndex incremented but no next round started.
       if (session.currentIndex >= session.flags.length) {
         await endChallenge(message.channel as TextChannel, session);
       } else {
